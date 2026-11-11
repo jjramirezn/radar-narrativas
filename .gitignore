@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+
+# Inputs and practice runs stay local; only entrega/ (final-set results) is committed.
+datos/
+salida/
+trabajo/
+
+# Upstream challenge repo, cloned alongside for data and the official scorer.
+desafio-qualydata/

@@ -1,0 +1,33 @@
+[project]
+name = "radar"
+version = "0.1.0"
+description = "Narrativas y coordinación a escala: Hackathon Argentina Space 2026, desafío QualyData"
+requires-python = "==3.12.*"
+dependencies = [
+    "anthropic>=2.8.0",
+    "duckdb>=1.1",
+    "igraph>=0.11",
+    "leidenalg>=0.10",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "pyarrow>=17",
+    "scikit-learn>=1.5",
+    "sentence-transformers>=3.3",
+    "torch>=2.5",
+]
+
+[project.scripts]
+radar = "radar.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# CPU-only torch: avoids pulling ~2 GB of CUDA libraries we can't use anyway.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
