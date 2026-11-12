@@ -11,3 +11,6 @@ trabajo/
 
 # Upstream challenge repo, cloned alongside for data and the official scorer.
 desafio-qualydata/
+
+# Local browser-automation screenshots
+.playwright-mcp/

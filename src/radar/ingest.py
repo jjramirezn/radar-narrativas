@@ -46,6 +46,7 @@ def load_raw(ctx: Context, name: str) -> dict:
     cols = SCHEMAS[name]
     path = find_input(ctx.datos, name)
     info = {"archivo": path.name if path else None}
+    rejects_before = _rejected(ctx)
     if path is None:
         if name == "comentarios":
             raise SystemExit(f"Falta comentarios.csv(.gz) en {ctx.datos}")
@@ -56,8 +57,12 @@ def load_raw(ctx: Context, name: str) -> dict:
     if path.suffix == ".parquet":
         sources = [f"read_parquet('{path}')"]
     else:
-        opts = "all_varchar = true, header = true, store_rejects = true, null_padding = true"
-        sources = [f"read_csv('{path}', {opts})", f"read_csv('{path}', {opts}, encoding = 'latin-1')"]
+        # Strictest first. store_rejects skips and counts unparseable lines; the lenient last
+        # resort can silently drop many rows around a broken quote, so it's only a fallback.
+        opts = "all_varchar = true, header = true"
+        sources = [f"read_csv('{path}', {opts}, store_rejects = true)",
+                   f"read_csv('{path}', {opts}, store_rejects = true, encoding = 'latin-1')",
+                   f"read_csv('{path}', {opts}, ignore_errors = true, null_padding = true)"]
     for i, source in enumerate(sources):
         try:
             ctx.con.execute(f"CREATE OR REPLACE TEMP VIEW src_{name} AS SELECT * FROM {source}")
@@ -68,18 +73,24 @@ def load_raw(ctx: Context, name: str) -> dict:
                                for c in cols)
             ctx.con.execute(f"CREATE OR REPLACE TABLE raw_{name} AS "
                             f"SELECT {select}, row_number() OVER () AS orden FROM src_{name}")
+            info["modo_lectura"] = ["estricto", "latin-1", "tolerante"][i] if len(sources) > 1 else "parquet"
             break
         except Exception as exc:  # noqa: BLE001 - try the next way of reading the file
             if i == len(sources) - 1:
                 raise
-            info["reintento_encoding"] = str(exc)[:200]
+            info.setdefault("reintentos", []).append(str(exc).splitlines()[0][:160])
     info["filas"] = ctx.con.execute(f"SELECT count(*) FROM raw_{name}").fetchone()[0]
     info["columnas_faltantes"] = [c for c in cols if c not in present]
-    try:
-        info["lineas_rechazadas"] = ctx.con.execute("SELECT count(*) FROM reject_errors").fetchone()[0]
-    except Exception:  # noqa: BLE001 - parquet inputs have no reject table
-        info["lineas_rechazadas"] = 0
+    info["lineas_rechazadas"] = _rejected(ctx) - rejects_before
     return info
+
+
+def _rejected(ctx: Context) -> int:
+    """Lines DuckDB has rejected so far on this connection (its reject table accumulates)."""
+    try:
+        return ctx.con.execute("SELECT count(*) FROM reject_errors").fetchone()[0]
+    except Exception:  # noqa: BLE001 - no CSV read yet, so no reject table
+        return 0
 
 
 def run(ctx: Context):

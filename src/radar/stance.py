@@ -27,6 +27,9 @@ LOPSIDED = 0.25
 C = 10.0
 SHORT_REPLY_WORDS = 5
 UNSURE = 0.15  # |p - 0.5| below this counts as unsure
+# Short replies that contradict their parent ("Mentira", "Nada que ver") take the opposite stance.
+SHORT_DISAGREE = (r"\b(?:mentira|falso|fake|verso|chamuyo|nada que ver|para nada|cualquiera|ni ah[ií]|"
+                  r"no es as[ií]|no es cierto|es al rev[eé]s|discrepo|no coincido|no estoy de acuerdo)\b|^\s*no[.!]*\s*$")
 REJECTION_MARKERS = ["mentira", "falso", "fake", "verso", "trucho", "nada que ver", "no es cierto", "desmint",
                      "sin pruebas", "inventan", "invento", "no hubo", "nadie va a", "dejen de", "no es así", "exager",
                      "operación", "opereta", "es al revés"]
@@ -38,7 +41,12 @@ frente a ESA afirmación:
 - "rechaza": la niega, la refuta o da argumentos en contra, aunque use palabras parecidas
   (por ejemplo "es mentira que...") o hable con ironía.
 - "otra": el comentario no trata sobre esta afirmación.
-Juzgá el sentido, no las palabras sueltas. Respondé solo con el JSON pedido."""
+Juzgá el sentido, no las palabras sueltas:
+- Si la afirmación tiene dos partes, juzgá la idea principal (la primera), no un detalle.
+- Cuidado con la ironía: citar lo que dice el otro lado para burlarse ("dicen que...", "según
+  ellos...") suele ir en contra de lo citado.
+- Defender a quien la afirmación acusa, o dar una explicación alternativa, es rechazarla.
+Respondé solo con el JSON pedido."""
 
 SCHEMA = {
     "type": "object",
@@ -51,7 +59,11 @@ SCHEMA = {
 
 
 def diverse(X: np.ndarray, pool: np.ndarray, k: int, seed: int, exclude=()) -> np.ndarray:
-    """The row nearest each of k k-means centers, skipping rows already chosen."""
+    """The row nearest each of k k-means centers, skipping rows already chosen.
+
+    (Skipping near-copies of chosen rows was tried and hurt: in this embedding space genuinely
+    different comments often sit above 0.95 cosine, so picks drifted to atypical comments.)
+    """
     pool = np.setdiff1d(pool, np.asarray(exclude, dtype=int))
     if len(pool) <= k:
         return pool
@@ -137,6 +149,10 @@ def run(ctx: Context, llm: LLM, claims: dict, labeler=None) -> pd.DataFrame:
         answers = labeler([(claims.get(n, n), [text_of_u[u] for u in picks]) for n, picks in second_jobs])
         for (n, picks), labels in zip(second_jobs, answers):
             labeled[n].update({u: lab for u, lab in zip(picks, labels) if lab})
+        # Every AI label, kept for auditing: which comments the model saw and what it said.
+        pd.DataFrame([{"narrativa": n, "afirmacion": claims.get(n, n), "texto": text_of_u[u], "etiqueta": v}
+                      for n in narratives for u, v in labeled[n].items()]
+                     ).to_csv(ctx.trabajo / "etiquetas_ia.csv", index=False)
 
     for n in narratives:
         rows = df.index[df["narrativa"] == n].to_numpy()
@@ -170,13 +186,15 @@ def run(ctx: Context, llm: LLM, claims: dict, labeler=None) -> pd.DataFrame:
     # Reply rules, applied down the chains: parents settle before their replies.
     is_reply = df["respuesta_a"].notna() & (df["narrativa"] != "")
     short = is_reply & (df["nw"] <= SHORT_REPLY_WORDS)
+    disagree = short & df["texto"].str.lower().str.contains(SHORT_DISAGREE, regex=True)
+    agree = short & ~disagree
     unsure = is_reply & ~short & ((df["p_apoya"] - 0.5).abs() < UNSURE)
     flip = {"apoya": "rechaza", "rechaza": "apoya"}
     for _ in range(20):
         parent_stance = parent_pos.map(lambda p: df["postura"].iat[int(p)] if pd.notna(p) else "")
         new = df["postura"].copy()
-        new[short] = parent_stance[short].where(parent_stance[short] != "", df["postura"][short])
-        new[unsure] = parent_stance[unsure].map(flip).fillna(df["postura"][unsure])
+        new[agree] = parent_stance[agree].where(parent_stance[agree] != "", df["postura"][agree])
+        new[disagree | unsure] = parent_stance[disagree | unsure].map(flip).fillna(df["postura"][disagree | unsure])
         if new.equals(df["postura"]):
             break
         df["postura"] = new

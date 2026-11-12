@@ -3,7 +3,7 @@ import argparse
 import os
 from pathlib import Path
 
-from . import coordination, ingest, narratives, output, stance
+from . import coordination, ingest, naming, narratives, output, report, stance
 from .context import Context, Settings
 from .llm import LLM
 
@@ -27,6 +27,8 @@ def main():
     ap.add_argument("--entrega", type=Path, default=Path("entrega"), help="Dónde escribir los 4 archivos")
     ap.add_argument("--trabajo", type=Path, default=None, help="Carpeta de trabajo (Parquet, cachés)")
     ap.add_argument("--sin-ia", action="store_true", help="No llamar a ningún modelo de lenguaje")
+    ap.add_argument("--ia-nueva", action="store_true",
+                    help="Ignorar las respuestas registradas en registro_ia/ y volver a pedirlas")
     ap.add_argument("--modelo-ia", default=Settings.llm_model)
     ap.add_argument("--modelo-embeddings", default=Settings.embedding_model)
     args = ap.parse_args()
@@ -37,10 +39,11 @@ def main():
 
     with ctx.costs.stage("ingesta"):
         ingest.run(ctx)
-    llm = LLM(ctx)
+    llm = LLM(ctx, refresh=args.ia_nueva)
     with ctx.costs.stage("narrativas"):
         narratives.run(ctx)
-    claims = dict(ctx.con.execute("SELECT narrativa, titulo FROM narrativas").fetchall())
+    with ctx.costs.stage("nombres"):
+        claims = naming.run(ctx, llm)
     with ctx.costs.stage("postura"):
         df = stance.run(ctx, llm, claims)
     ctx.put_table("etiquetas", df[["comentario_id", "narrativa", "postura"]])
@@ -48,6 +51,8 @@ def main():
         coordination.run(ctx)
     with ctx.costs.stage("salida"):
         cost = output.write(ctx)
+    with ctx.costs.stage("tablero"):
+        report.write_dashboard(ctx, cost)
     ctx.save_report()
     print(f"[radar] listo: {cost['comentarios_procesados']} comentarios en {cost['segundos']}s -> {ctx.entrega}")
 

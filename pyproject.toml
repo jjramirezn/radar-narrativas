@@ -3,6 +3,8 @@ name = "radar"
 version = "0.1.0"
 description = "Narrativas y coordinación a escala: Hackathon Argentina Space 2026, desafío QualyData"
 requires-python = "==3.12.*"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 dependencies = [
     "anthropic>=2.8.0",
     "duckdb>=1.1",

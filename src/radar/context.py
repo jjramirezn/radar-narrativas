@@ -27,6 +27,8 @@ class Costs:
     input_tokens: int = 0
     output_tokens: int = 0
     usd: float = 0.0
+    llm_replayed: int = 0      # answers reused from registro_ia/ instead of calling the API
+    usd_replayed: float = 0.0  # what those answers cost when they were first requested
 
     @contextmanager
     def stage(self, name: str):
@@ -49,6 +51,8 @@ class Costs:
             "llamadas_ia": self.llm_calls,
             "usd_ia": round(self.usd, 4),
             "usd_por_mil_comentarios": round(self.usd / comments * 1000, 6) if comments else 0.0,
+            "llamadas_ia_reutilizadas": self.llm_replayed,
+            "usd_ia_original_de_reutilizadas": round(self.usd_replayed, 4),
             "modelo_ia": settings.llm_model if settings.use_llm else None,
             "modelo_embeddings": settings.embedding_model,
             "hardware": hardware(),
