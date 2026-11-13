@@ -1,0 +1,24 @@
+{
+  "comentarios_procesados": 150000,
+  "segundos": 271.1,
+  "tokens_ia": 64385,
+  "tokens_ia_entrada": 49903,
+  "tokens_ia_salida": 14482,
+  "llamadas_ia": 28,
+  "usd_ia": 0.0122,
+  "usd_por_mil_comentarios": 8.2e-05,
+  "llamadas_ia_reutilizadas": 0,
+  "usd_ia_original_de_reutilizadas": 0.0,
+  "modelo_ia": "claude-haiku-5-5",
+  "modelo_embeddings": "intfloat/multilingual-e5-small",
+  "hardware": "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics, 16 hilos, 31 GB RAM, sin GPU",
+  "almacenamiento": "DuckDB en proceso sobre archivos Parquet locales",
+  "etapas_segundos": {
+    "ingesta": 0.7,
+    "narrativas": 234.0,
+    "nombres": 7.2,
+    "postura": 17.2,
+    "coordinacion": 1.4,
+    "polaridad": 8.9
+  }
+}
