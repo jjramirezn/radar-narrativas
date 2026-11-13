@@ -49,6 +49,9 @@ def main():
     ctx.put_table("etiquetas", df[["comentario_id", "narrativa", "postura"]])
     with ctx.costs.stage("coordinacion"):
         coordination.run(ctx)
+    with ctx.costs.stage("polaridad"):
+        if stance.fix_polarity(ctx, llm):
+            ctx.put_table("etiquetas", ctx.comments[["comentario_id", "narrativa", "postura"]])
     with ctx.costs.stage("salida"):
         cost = output.write(ctx)
     with ctx.costs.stage("tablero"):

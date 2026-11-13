@@ -126,7 +126,7 @@ def run(ctx: Context) -> pd.DataFrame:
     graph, nodes, counts = build_graph(df)
     part = leidenalg.find_partition(graph, leidenalg.ModularityVertexPartition, weights="weight",
                                     seed=ctx.settings.seed)
-    rows, assigned = [], {}
+    rows, assigned, webs = [], {}, {}
     for c, members in enumerate(part):
         members = list(members)
         # Peel off members with too few links inside the group (accounts merely touching it).
@@ -145,6 +145,7 @@ def run(ctx: Context) -> pd.DataFrame:
         if density >= MIN_DENSITY:
             for m in members:
                 assigned[nodes[m]] = c
+            webs[c] = (len(members), [e.tuple for e in sub.es], list(sub.es["weight"]))
     stats = pd.DataFrame(rows, columns=["comunidad", "cuentas", "densidad", "peso_medio", "coordinada"])
     order = stats.loc[stats["coordinada"].astype(bool)].sort_values("cuentas", ascending=False)["comunidad"].tolist()
     names = {c: f"op{i + 1:02d}" for i, c in enumerate(order)}
@@ -157,4 +158,9 @@ def run(ctx: Context) -> pd.DataFrame:
     ctx.report["coordinacion"] = {**counts, "comunidades_candidatas": len(stats),
                                   "operaciones": len(order), "cuentas_marcadas": len(groups)}
     ctx.coord_stats = stats
+    # Network density per operation, shown in the dashboard as evidence for the flag.
+    ctx.report["operaciones"] = {names[c]: {"densidad": float(d)}
+                                 for c, d in zip(stats["comunidad"], stats["densidad"]) if c in names}
+    # Each operation's internal links (member positions 0..n-1), drawn as a small web in the dashboard.
+    ctx.coord_webs = {names[c]: web for c, web in webs.items() if c in names}
     return groups

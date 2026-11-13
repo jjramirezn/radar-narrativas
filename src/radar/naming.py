@@ -18,6 +18,7 @@ from .context import Context
 from .llm import LLM
 
 EXAMPLES = 12
+HEADER = re.compile(r"^Grupo (\S+) \(\d+ comentarios\)\. Palabras frecuentes: (.*)$", re.MULTILINE)
 CONCESSIVE = re.compile(r",?\s+(?:aunque|pero|sin embargo|no obstante|mientras que)\s+", re.IGNORECASE)
 
 SYSTEM = """Sos analista de conversación pública argentina en redes sociales.
@@ -77,6 +78,51 @@ def examples(X: np.ndarray, g: pd.DataFrame, seed: int) -> list[str]:
     return picks
 
 
+def blocks_of(prompt: str) -> dict:
+    """Group id -> (key phrases, examples), read back from a naming prompt."""
+    heads = list(HEADER.finditer(prompt))
+    out = {}
+    for head, nxt in zip(heads, heads[1:] + [None]):
+        body = prompt[head.end():nxt.start() if nxt else len(prompt)]
+        out[head.group(1)] = (set(head.group(2).split(", ")),
+                              {line[4:] for line in body.split("\n") if line.startswith("  - ")})
+    return out
+
+
+def jaccard(a: set, b: set) -> float:
+    return len(a & b) / len(a | b) if a | b else 0.0
+
+
+def near_review(prompt: str):
+    """Near replay: pair each group with a recorded group sharing most key phrases or examples, reuse its review."""
+    current = blocks_of(prompt)
+
+    def near(entries: list) -> tuple:
+        best = (None, 0.0, {})
+        for entry in entries:
+            if "grupos" not in entry["respuesta"]:
+                continue
+            recorded = blocks_of(entry["pedido"])
+            pairs = sorted(((max(jaccard(c[0], r[0]), jaccard(c[1], r[1])), cid, rid)
+                            for cid, c in current.items() for rid, r in recorded.items()), reverse=True)
+            match, used = {}, set()
+            for score, cid, rid in pairs:
+                if score >= 0.5 and cid not in match and rid not in used:
+                    match[cid] = rid
+                    used.add(rid)
+            covered = len(match) / max(len(current), 1)
+            if covered > best[1]:
+                best = (entry, covered, match)
+        entry, covered, match = best
+        if entry is None:
+            return None, 0.0
+        back = {rid: cid for cid, rid in match.items()}
+        groups = [{**g, "id": back[g["id"]], "igual_a": back.get(g.get("igual_a"))}
+                  for g in entry["respuesta"]["grupos"] if g.get("id") in back]
+        return {"grupos": groups}, covered
+    return near
+
+
 def run(ctx: Context, llm: LLM) -> dict:
     """Returns {narrative: claim}. Merges duplicates and drops non-narratives in place."""
     narr = ctx.con.execute("SELECT * FROM narrativas").df()
@@ -90,7 +136,8 @@ def run(ctx: Context, llm: LLM) -> dict:
         listing = "\n".join(f"  - {t[:200]}" for t in examples(X, g, seed))
         blocks.append(f"Grupo {n['narrativa']} ({len(g)} comentarios). Palabras frecuentes: "
                       f"{n['frases_clave'].replace('|', ', ')}\n{listing}")
-    answer = llm.json(SYSTEM, "\n\n".join(blocks), SCHEMA, max_tokens=8000)
+    prompt = "\n\n".join(blocks)
+    answer = llm.json(SYSTEM, prompt, SCHEMA, max_tokens=8000, near=near_review(prompt))
     if not answer:
         return claims
 

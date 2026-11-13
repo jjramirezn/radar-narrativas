@@ -4,7 +4,7 @@
 
 Un pipeline que, sobre cientos de miles de comentarios, responde dos preguntas: **qué narrativas circulan** (quién las apoya, quién las rechaza y desde cuándo) y **qué parte de la conversación está armada** (qué cuentas actúan coordinadas y en qué operación). Corre con un comando, en una notebook sin GPU, y usa IA solo sobre muestras: el costo no crece con el volumen.
 
-En el set de práctica (200.000 comentarios) saca **53,8 de 55 puntos automáticos** con **US$ 0,012 de IA en total** (seis millonésimas de dólar por comentario), en poco más de un minuto con la caché de embeddings y unos 6 minutos la primera vez. Sin IA saca 51,4. La línea base del desafío saca 16,8.
+En el set de práctica (200.000 comentarios) saca **53,8 de 55 puntos automáticos** con **US$ 0,012 de IA en total** (seis millonésimas de dólar por comentario), en poco más de un minuto con la caché de embeddings y unos 6 minutos la primera vez. Sin IA saca 51,4. La línea base del desafío saca 16,8. En el set final (150.000 comentarios) corre en 4 minutos y medio desde cero, también con US$ 0,012 de IA.
 
 ## Cómo correrlo
 
@@ -42,6 +42,7 @@ Otros comandos útiles: `make datos` baja el material del desafío, `make practi
 
 - Todos los pasos aleatorios usan semillas fijas (k-means, Leiden, muestreo) y las versiones exactas están en `uv.lock`.
 - Cada respuesta de la IA queda registrada en `registro_ia/<set>.jsonl`, con el pedido, la respuesta, los tokens y el costo. Si se vuelve a correr sobre los mismos datos, el pipeline reutiliza esas respuestas en vez de llamar a la API: el resultado es idéntico aunque no haya clave. Lo verificamos con tres corridas (respuestas nuevas, repetida y con una clave inválida): los tres archivos de la entrega salieron idénticos byte a byte.
+- Otra máquina puede redondear distinto los embeddings, y eso alcanza para cambiar levemente un pedido (otro conteo, otro ejemplo). Si un pedido no está tal cual en el registro, el pipeline arma la respuesta con lo registrado sobre los mismos comentarios y las mismas narrativas antes de llamar a la API. Lo probamos en el set final con vectores que difieren en 0,0000002: 26 de 28 respuestas salieron del registro, las 12 afirmaciones quedaron iguales y el 99,8% de los comentarios mantuvo narrativa y postura.
 - `--ia-nueva` ignora el registro y vuelve a pedir las respuestas; `--sin-ia` corre sin IA. `costo.json` separa las llamadas nuevas de las reutilizadas.
 
 ## Qué produce
@@ -73,6 +74,7 @@ CSV.gz ─► ingesta (DuckDB) ─► Parquet ─┬─► narrativas ─► nom
    - el origen de cada narrativa es la primera ráfaga de sus comentarios más típicos.
 4. **Nombres (IA, una llamada).** Claude ve una docena de comentarios representativos de cada narrativa y devuelve su afirmación en una oración, frases clave, si dos grupos son la misma narrativa y si un grupo no es narrativa.
 5. **Postura.** Por narrativa, Claude etiqueta unas 60 muestras elegidas para cubrir todos los argumentos (30 diversas y, si el reparto sale desparejo, 30 donde el clasificador duda) y una regresión logística sobre los embeddings etiqueta el resto en milisegundos. Las respuestas cortas heredan la postura de su padre; las dudosas toman la contraria, porque la mayoría de las respuestas discute.
+   - **Control de polaridad.** En el desafío, una narrativa es la afirmación que sostiene al menos la mitad de su conversación, y las campañas empujan la narrativa, no su desmentida (así ocurre en las 13 narrativas de práctica). Si una narrativa queda con menos de 40% de apoyo, o una operación escribe 80% o más en contra de su propia narrativa, la frase quedó escrita del lado minoritario: se invierte y Claude vuelve a etiquetar contra la afirmación reescrita. Si esa nueva etiqueta no sale clara, se queda con la inversión. En práctica corrigió una narrativa de la rodaja de colectivos (postura de 0,972 a 0,991) y no tocó las demás.
 6. **Coordinación.** Una ráfaga no prueba nada; lo que delata a una operación es la repetición: las mismas cuentas, juntas, una y otra vez.
    - Cada cuenta es un vector sobre "eventos" (publicación × ventana de 15 y de 60 minutos) pesados por rareza: coincidir en un momento tranquilo pesa mucho más que coincidir en uno viral, y las ventanas multitudinarias se ignoran.
    - Se suman hashtags raros compartidos y respuestas mutuas repetidas. Las frases repetidas solas no sirven: la gente genuina se repite muchísimo.
@@ -126,12 +128,12 @@ Detalle:
 - **Narrativas:** agrupamiento B-cubed 0,999, ruido 0,999, postura 0,96, origen de las emergentes 1,0 (las tres a menos de 3 horas), 13 narrativas encontradas de 13 reales.
 - **Coordinación:** precisión 1,000, cobertura 0,939, agrupamiento por operación 0,942. Las tres campañas encontradas, ninguna cuenta genuina acusada.
 
-**Generalización** (sin ajustar nada por tema, `make rodajas`, con Haiku, dos corridas):
+**Generalización** (sin ajustar nada por tema, `make rodajas`, con Haiku):
 
 | Rodaja | Narrativas reales / encontradas | Agrupamiento | Postura | Coordinación | Total |
 |---|---|---|---|---|---|
-| Litio (2 campañas) | 5 / 5 | 0,993 | 0,93–0,94 | F1 0,983 | 54,0–54,1 |
-| Colectivos (sin campañas) | 4 / 4 | 0,996 | 0,97 | 0 cuentas marcadas (correcto) | 29,7 de ~30 posibles |
+| Litio (2 campañas) | 5 / 5 | 0,993 | 0,97 | F1 0,983 | 54,2 |
+| Colectivos (sin campañas) | 4 / 4 | 0,996 | 0,99 | 0 cuentas marcadas (correcto) | 29,9 de ~30 posibles |
 | Hospital (1 campaña) | 4 / 4 | 1,000 | 0,97 | F1 1,000 | 54,8 |
 
 En litio y hospital el agrupamiento deja un fragmento chico de una narrativa que cambia de redacción (49 y 152 comentarios); la revisión de Claude lo reconoce y lo fusiona.
@@ -139,6 +141,23 @@ En litio y hospital el agrupamiento deja un fragmento chico de una narrativa que
 **Robustez** (`make sucio`, datos corrompidos a propósito): 53,4 contra 53,7 con los datos limpios.
 
 **Postura frente a errores de la IA:** con etiquetas perfectas la postura llega a 0,988; con 10% de etiquetas equivocadas, a 0,956; con 20%, a 0,913. Por eso un modelo chico alcanza.
+
+## Set final
+
+La entrega en `entrega/` sale de una corrida desde cero del comando de arriba, con `--ia-nueva`, sin caché de embeddings ni respuestas guardadas. Nada se etiquetó ni se editó a mano. Las respuestas de la IA de esa corrida quedan en `registro_ia/final.jsonl`: `make final` las reutiliza y reproduce la misma entrega. Lo verificamos desde cero en la misma máquina: 28 de 28 respuestas salieron del registro, sin llamadas nuevas, y los tres archivos quedaron idénticos byte a byte.
+
+| | |
+|---|---|
+| Comentarios | 150.000 |
+| Tiempo | 4 min 31 s en la notebook sin GPU, de los que unos 3 min 30 s son embeddings que la caché ahorra en las corridas siguientes |
+| IA | 28 llamadas, 64.000 tokens, US$ 0,012 en total (US$ 0,00008 cada 1.000 comentarios) |
+| Narrativas | 12, en tres temas: seguridad, festival y dique. Tres aparecen con el período ya empezado: la licitación arreglada del dique (9 de octubre), el cierre de la comisaría del norte (9 de octubre) y la grilla del festival que se cae (12 de octubre) |
+| Ruido | 31.472 comentarios (21%) sin narrativa |
+| Coordinación | 3 operaciones, 81 cuentas: una empuja el dique como solución para el agua (40 cuentas), otra el cierre de la comisaría (21) y otra que el festival es un derroche (20) |
+
+El control de polaridad actuó en una narrativa. Claude redactó la del agua del dique del lado contrario al que empuja su operación (28% de apoyo, y la operación escribía en contra). El pipeline invirtió las etiquetas y, como el reetiquetado no salió claro, dejó la afirmación como «No es cierto que…». Ese control lo agregamos después de ver este caso en una primera corrida del set final, y antes de usarlo lo validamos en práctica (no cambió nada) y en las rodajas (mejoró colectivos).
+
+Un riesgo que queda: cuando una narrativa está pareja, el sentido de la frase depende de cómo la redacte Claude. La de las cámaras quedó «no sirven para bajar los robos», con 41% de apoyo; en la primera corrida había salido «bajan los robos», con 56%. El puntaje oficial compara `apoya` y `rechaza` literalmente, así que si la frase no coincide con la del generador, esa narrativa cuenta al revés. No lo corregimos a mano.
 
 ## Validación
 
@@ -171,4 +190,5 @@ Todo el código de este repositorio se escribió durante el hackathon. Usamos es
 
 - Parte de la fuerza viene de señales estructurales de esta conversación (las respuestas discuten dentro de la narrativa de su padre, el ruido casi nunca recibe respuestas). El pipeline las usa como señales y no como reglas fijas, y mide cuánto depende de ellas.
 - Sin IA, la postura es débil (0,57): separa dos lados por la dirección en que las respuestas difieren de su padre, pero a veces confunde cuál es cuál.
+- En una narrativa pareja, cerca de 50% de apoyo, ninguna señal dice de qué lado está la afirmación: queda la redacción que elija Claude, y puede salir al revés de una corrida a otra (ver «Set final»).
 - La coordinación encuentra grupos que actúan juntos. Una operación de una sola cuenta, o una que imita perfectamente el ritmo genuino, no deja ese rastro.

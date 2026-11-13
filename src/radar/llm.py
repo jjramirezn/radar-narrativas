@@ -3,7 +3,10 @@
 Every answer is appended to registro_ia/<dataset>.jsonl, keyed by a hash of the exact request.
 A later run that makes the same request reuses the recorded answer instead of calling the API,
 so re-running the pipeline on the same data reproduces the same result, with or without a key.
-`--ia-nueva` ignores the record and asks again.
+Float rounding on another machine (or with another embedding cache) can shift a request slightly:
+a different count, one different example. Callers can then pass `near`, which rebuilds the answer
+from recorded answers about the same items (the same comments, the same narratives) before
+any live call is made. `--ia-nueva` ignores the record and asks again.
 
 Every call is optional: without credentials, network or a recorded answer, callers get None
 back and fall back to a non-AI path, so the pipeline always finishes.
@@ -24,6 +27,7 @@ PRICES = {
     "claude-opus-5-5": (4.00, 20.00),
 }
 RECORD_DIR = Path(__file__).resolve().parents[2] / "registro_ia"
+NEAR_MIN = 0.5  # share of a request's items a near replay must cover to stand in for a live call
 
 
 class LLM:
@@ -66,8 +70,11 @@ class LLM:
         price_in, price_out = PRICES.get(self.model, PRICES["claude-opus-5-5"])
         return (input_tokens * price_in + output_tokens * price_out) / 1e6
 
-    def json(self, system: str, prompt: str, schema: dict, max_tokens: int = 8000) -> dict | None:
-        """One call whose answer must match `schema`. Returns the parsed object, or None on any failure."""
+    def json(self, system: str, prompt: str, schema: dict, max_tokens: int = 8000, near=None) -> dict | None:
+        """One call whose answer must match `schema`. Returns the parsed object, or None on any failure.
+
+        `near(entries)` gets the recorded entries and returns (answer, share of the request's items it covers).
+        """
         kwargs = {
             "model": self.model, "max_tokens": max_tokens, "system": system,
             "messages": [{"role": "user", "content": prompt}],
@@ -83,6 +90,14 @@ class LLM:
                 costs.llm_replayed += 1
                 costs.usd_replayed += entry["usd"]
             return entry["respuesta"]
+        if near is not None and self.recorded:
+            with self._lock:
+                entries = list(self.recorded.values())
+            answer, covered = near(entries)
+            if answer is not None and (covered >= NEAR_MIN or (self.client is None and covered > 0)):
+                with self._lock:
+                    costs.llm_replayed += 1
+                return answer
         if self.client is None:
             return None
         import anthropic

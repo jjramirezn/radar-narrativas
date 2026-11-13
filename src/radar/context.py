@@ -88,6 +88,7 @@ class Context:
     # Filled by the narratives step and reused downstream.
     comments: object = None
     embeddings: object = None
+    coord_webs: object = None
 
     def __post_init__(self):
         self.trabajo.mkdir(parents=True, exist_ok=True)

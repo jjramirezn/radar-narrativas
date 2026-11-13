@@ -14,6 +14,8 @@ Per narrative, a small classifier learns from ~60 labeled comments and labels th
 Labels come from Claude. Without it, each narrative is split along the direction in which
 replies differ from their parents, and the side using more rejection words is "rechaza".
 """
+import re
+
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
@@ -27,6 +29,9 @@ LOPSIDED = 0.25
 C = 10.0
 SHORT_REPLY_WORDS = 5
 UNSURE = 0.15  # |p - 0.5| below this counts as unsure
+MIN_SUPPORT = 0.40  # under this share of "apoya", the claim was written from the minority side
+OP_AGAINST = 0.80   # an operation writing this much against its own narrative means the claim is backwards
+MAX_OTHER = 0.25    # relabeling a flipped narrative is kept only if under this share of labels are "otra"
 # Short replies that contradict their parent ("Mentira", "Nada que ver") take the opposite stance.
 SHORT_DISAGREE = (r"\b(?:mentira|falso|fake|verso|chamuyo|nada que ver|para nada|cualquiera|ni ah[ií]|"
                   r"no es as[ií]|no es cierto|es al rev[eé]s|discrepo|no coincido|no estoy de acuerdo)\b|^\s*no[.!]*\s*$")
@@ -76,13 +81,45 @@ def diverse(X: np.ndarray, pool: np.ndarray, k: int, seed: int, exclude=()) -> n
     return np.array(picks, dtype=int)
 
 
+def numbered(body: str) -> list[str]:
+    """Items of a "1. ...\\n2. ..." listing, read back from a prompt (an item may span lines)."""
+    texts, rest, i = [], body.removeprefix("1. "), 1
+    while (cut := rest.find(f"\n{i + 1}. ")) >= 0:
+        texts.append(rest[:cut])
+        rest = rest[cut + len(f"\n{i + 1}. "):]
+        i += 1
+    return texts + [rest]
+
+
+def recorded_labels(entries: list) -> dict:
+    """(claim, comment) -> label, from every recorded labeling answer."""
+    out = {}
+    for entry in entries:
+        head, sep, body = entry["pedido"].partition("\n\nComentarios:\n")
+        if not sep or "etiquetas" not in entry["respuesta"]:
+            continue
+        claim, texts = head.removeprefix("Afirmación: "), numbered(body)
+        for item in entry["respuesta"]["etiquetas"]:
+            if 1 <= item.get("id", 0) <= len(texts):
+                out[(claim, texts[item["id"] - 1])] = item.get("postura")
+    return out
+
+
 def llm_labeler(llm: LLM):
     """Returns a function (claim, texts) -> list of 'apoya' / 'rechaza' / 'otra' / None, batched per call."""
+    def near_labels(claim: str, texts: list[str]):
+        def near(entries: list) -> tuple:
+            known = recorded_labels(entries)
+            found = [{"id": i + 1, "postura": known[(claim, t)]} for i, t in enumerate(texts) if (claim, t) in known]
+            return ({"etiquetas": found} if found else None), len(found) / max(len(texts), 1)
+        return near
+
     def label(jobs: list[tuple[str, list[str]]]) -> list[list]:
         prompts = []
         for claim, texts in jobs:
             listing = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
-            prompts.append((SYSTEM, f"Afirmación: {claim}\n\nComentarios:\n{listing}", SCHEMA))
+            prompts.append((SYSTEM, f"Afirmación: {claim}\n\nComentarios:\n{listing}", SCHEMA, 8000,
+                            near_labels(claim, texts)))
         out = []
         for (claim, texts), answer in zip(jobs, llm.json_many(prompts)):
             labels = [None] * len(texts)
@@ -109,12 +146,18 @@ def reply_axis_split(X: np.ndarray, rows: np.ndarray, texts: list[str], reply_pa
     return side
 
 
-def run(ctx: Context, llm: LLM, claims: dict, labeler=None) -> pd.DataFrame:
+def run(ctx: Context, llm: LLM, claims: dict, labeler=None, only=None) -> pd.DataFrame:
+    """Label stance for every narrative, or just those in `only` (leaving the rest untouched)."""
     df, X, seed = ctx.comments, ctx.embeddings, ctx.settings.seed
     labeler = labeler or (llm_labeler(llm) if llm.available else None)
-    df["postura"] = ""
-    df["p_apoya"] = np.nan
-    narratives = sorted(n for n in df["narrativa"].unique() if n)
+    redo = df["narrativa"].isin(only) if only else pd.Series(True, index=df.index)
+    if only is None or "postura" not in df:
+        df["postura"] = ""
+        df["p_apoya"] = np.nan
+    else:
+        df.loc[redo, "postura"] = ""
+        df.loc[redo, "p_apoya"] = np.nan
+    narratives = sorted(n for n in df["narrativa"].unique() if n and (only is None or n in only))
     pos = pd.Series(np.arange(len(df)), index=df["comentario_id"])
     parent_pos = df["respuesta_a"].map(pos)
 
@@ -152,7 +195,8 @@ def run(ctx: Context, llm: LLM, claims: dict, labeler=None) -> pd.DataFrame:
         # Every AI label, kept for auditing: which comments the model saw and what it said.
         pd.DataFrame([{"narrativa": n, "afirmacion": claims.get(n, n), "texto": text_of_u[u], "etiqueta": v}
                       for n in narratives for u, v in labeled[n].items()]
-                     ).to_csv(ctx.trabajo / "etiquetas_ia.csv", index=False)
+                     ).to_csv(ctx.trabajo / "etiquetas_ia.csv", index=False, mode="a" if only else "w",
+                              header=not only)
 
     for n in narratives:
         rows = df.index[df["narrativa"] == n].to_numpy()
@@ -198,5 +242,93 @@ def run(ctx: Context, llm: LLM, claims: dict, labeler=None) -> pd.DataFrame:
         if new.equals(df["postura"]):
             break
         df["postura"] = new
-    ctx.report["postura"] = stats
+    ctx.report["postura" if only is None else "postura_reetiquetada"] = stats
     return df
+
+
+RESTATE_SYSTEM = """Sos analista de conversación pública argentina en redes sociales.
+Te paso afirmaciones que quedaron escritas desde el lado minoritario de su discusión, junto con comentarios
+del lado mayoritario. Para cada una escribí la afirmación central del lado mayoritario, en UNA oración simple
+de hasta 15 palabras, como la diría quien la sostiene. Una sola idea y un solo lado: nada de "no solo",
+"aunque" ni "pero". Respondé solo con el JSON pedido."""
+
+TITLED = re.compile(r"^(\S+): «(.*)»$", re.MULTILINE)
+RESTATE_SCHEMA = {
+    "type": "object",
+    "properties": {"afirmaciones": {"type": "array", "items": {
+        "type": "object", "properties": {"id": {"type": "string"}, "afirmacion": {"type": "string"}},
+        "required": ["id", "afirmacion"], "additionalProperties": False}}},
+    "required": ["afirmaciones"], "additionalProperties": False,
+}
+
+
+def fix_polarity(ctx: Context, llm: LLM) -> list:
+    """Flip narratives whose claim ended up on the minority side of their own conversation.
+
+    The challenge's convention, true for all 13 practice narratives: a narrative is the claim at least half
+    of its comments support, and coordinated operations push the narrative, not its rebuttal. If a narrative
+    ends under 40% support, or an operation writes 80% or more against its own narrative, the claim was
+    written from the other side: flip the labels and restate the claim. It never triggers on practice.
+    """
+    df = ctx.comments
+    groups = dict(ctx.sql("SELECT cuenta_id, grupo FROM grupos"))
+    on_topic = df[df["narrativa"] != ""]
+    support = on_topic.groupby("narrativa")["postura"].apply(lambda s: (s == "apoya").mean())
+    flip = set(support[support < MIN_SUPPORT].index)
+    by_op = on_topic.assign(grupo=on_topic["cuenta_id"].map(groups)).dropna(subset=["grupo"])
+    pushed = {}  # narrative -> the operation's own messages, which state the side it pushes
+    for _, g in by_op.groupby("grupo"):
+        main = g["narrativa"].value_counts().idxmax()
+        on_main = g[g["narrativa"] == main]
+        if (on_main["postura"] == "rechaza").mean() >= OP_AGAINST:
+            flip.add(main)
+            pushed[main] = on_main.loc[on_main["nw"] > 5, "texto"].value_counts().head(8).index.tolist()
+    if not flip:
+        return []
+    narr = ctx.con.execute("SELECT * FROM narrativas").df()
+    titles = dict(zip(narr["narrativa"], narr["titulo"]))
+    flipped = sorted(flip)
+    # Invert first: the cheap fix, kept unless relabeling against a restated claim clearly does better.
+    mask = df["narrativa"].isin(flip)
+    df.loc[mask, "postura"] = df.loc[mask, "postura"].map({"apoya": "rechaza", "rechaza": "apoya"})
+    df.loc[mask, "p_apoya"] = 1 - df.loc[mask, "p_apoya"]
+    inverted = df.loc[mask, ["postura", "p_apoya"]].copy()
+    blocks = []
+    for n in flipped:
+        side = df[(df["narrativa"] == n) & (df["postura"] == "apoya") & (df["nw"] > 5)]
+        examples = pushed.get(n) or side.sort_values("tipicidad", ascending=False).drop_duplicates("u").head(8)["texto"]
+        blocks.append(f"{n}: «{titles[n]}»\nComentarios del lado mayoritario:\n"
+                      + "\n".join(f"  - {t[:200]}" for t in examples))
+    prompt = "\n\n".join(blocks)
+
+    def near(entries: list) -> tuple:  # same claim restated before, with other examples
+        want = dict(TITLED.findall(prompt))
+        for entry in entries:
+            title_of = dict(TITLED.findall(entry["pedido"])) if "afirmaciones" in entry["respuesta"] else {}
+            by_title = {title_of[a["id"]]: a["afirmacion"] for a in entry["respuesta"].get("afirmaciones", [])
+                        if a.get("id") in title_of}
+            found = [{"id": n, "afirmacion": by_title[t]} for n, t in want.items() if t in by_title]
+            if found:
+                return {"afirmaciones": found}, len(found) / len(want)
+        return None, 0.0
+    answer = llm.json(RESTATE_SYSTEM, prompt, RESTATE_SCHEMA, max_tokens=2000, near=near) if llm.available else None
+    restated = {a["id"]: a["afirmacion"] for a in (answer or {}).get("afirmaciones", []) if a.get("id") in flip}
+    relabeled = []
+    for n, claim in restated.items():
+        run(ctx, llm, {**titles, n: claim}, only={n})
+        g = df[df["narrativa"] == n]
+        stats = ctx.report.get("postura_reetiquetada", {})
+        other = stats.get("otra", 0) / max(stats.get("etiquetadas", 0), 1)
+        if (g["postura"] == "apoya").mean() >= MIN_SUPPORT and other <= MAX_OTHER:
+            relabeled.append(n)
+        else:  # relabeling did worse (ambiguous claim): keep the inverted labels
+            df.loc[g.index, ["postura", "p_apoya"]] = inverted.loc[g.index]
+    def negated(claim: str) -> str:
+        return f"No es cierto que {claim[:1].lower()}{claim[1:]}"
+
+    narr["titulo"] = [restated[n] if n in relabeled else (negated(t) if n in flip else t)
+                      for n, t in zip(narr["narrativa"], narr["titulo"])]
+    ctx.put_table("narrativas", narr)
+    ctx.report["polaridad"] = {"invertidas": flipped, "reetiquetadas": relabeled,
+                               "apoyo_antes": {n: round(float(support.get(n, 0)), 3) for n in flipped}}
+    return flipped
